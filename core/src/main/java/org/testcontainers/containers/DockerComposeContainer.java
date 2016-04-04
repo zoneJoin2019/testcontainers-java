@@ -33,18 +33,25 @@ public class DockerComposeContainer extends GenericContainer implements Linkable
      */
     private final String identifier;
     private final Map<String, AmbassadorContainer> ambassadorContainers = new HashMap<>();
+    private final File composeFile;
     private Set<String> spawnedContainerIds;
+    private Map<String, Integer> scalingPreferences = new HashMap<>();
 
     public DockerComposeContainer(File composeFile) {
         this(composeFile, "up -d");
     }
 
-    @SuppressWarnings("WeakerAccess")
     public DockerComposeContainer(File composeFile, String command) {
-        super("dduportal/docker-compose:1.3.1");
+        this(composeFile, command, Base58.randomString(6).toLowerCase());
+    }
 
-        // Create a unique identifier and tell compose
-        identifier = Base58.randomString(6).toLowerCase();
+    @SuppressWarnings("WeakerAccess")
+    public DockerComposeContainer(File composeFile, String command, String identifier) {
+        super("dduportal/docker-compose:1.3.1");
+        this.composeFile = composeFile;
+
+        // Use a unique identifier so that containers created for this compose environment can be identified
+        this.identifier = identifier;
         addEnv("COMPOSE_PROJECT_NAME", identifier);
 
         // Map the docker compose file into the container
@@ -70,6 +77,13 @@ public class DockerComposeContainer extends GenericContainer implements Linkable
         profiler.setLogger(logger());
         profiler.start("Docker compose container startup");
 
+        applyScaling(); // scale before up, so that all scaled instances are available first for linking
+        createServices();
+        registerContainersForShutdown();
+        startAmbassadorContainers(profiler);
+    }
+
+    private void createServices() {
         // Start the docker-compose container, which starts up the services
         super.start();
         followOutput(new Slf4jLogConsumer(logger()), OutputFrame.OutputType.STDERR);
@@ -81,7 +95,21 @@ public class DockerComposeContainer extends GenericContainer implements Linkable
             Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
         }
         logger().info("Docker compose has finished running");
+    }
 
+    private void applyScaling() {
+        // Apply scaling
+        if (!scalingPreferences.isEmpty()) {
+            StringBuffer sb = new StringBuffer("scale");
+            for (Map.Entry<String, Integer> scale : scalingPreferences.entrySet()) {
+                sb.append(" ").append(scale.getKey()).append("=").append(scale.getValue());
+            }
+
+            new DockerComposeContainer(composeFile, sb.toString(), identifier).start();
+        }
+    }
+
+    private void registerContainersForShutdown() {
         // Ensure that all service containers that were launched by compose will be killed at shutdown
         Filters namesContainingComposeIdentifier = new Filters().withFilter("name", "/" + identifier);
         try {
@@ -103,7 +131,9 @@ public class DockerComposeContainer extends GenericContainer implements Linkable
         } catch (DockerException e) {
             logger().debug("Failed to stop a service container with exception", e);
         }
+    }
 
+    private void startAmbassadorContainers(Profiler profiler) {
         for (final Map.Entry<String, AmbassadorContainer> address : ambassadorContainers.entrySet()) {
 
             try {
@@ -193,5 +223,10 @@ public class DockerComposeContainer extends GenericContainer implements Linkable
      */
     public Integer getServicePort(String serviceName, Integer servicePort) {
         return ambassadorContainers.get(serviceName + ":" + servicePort).getMappedPort(servicePort);
+    }
+
+    public DockerComposeContainer withScaledService(String serviceBaseName, int numInstances) {
+        scalingPreferences.put(serviceBaseName, numInstances);
+        return this;
     }
 }
