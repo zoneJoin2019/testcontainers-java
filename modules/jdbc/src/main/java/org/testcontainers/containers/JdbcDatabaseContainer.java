@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit;
  *
  * @author richardnorth
  */
-public abstract class JdbcDatabaseContainer extends GenericContainer implements LinkableContainer {
+public abstract class JdbcDatabaseContainer<SELF extends JdbcDatabaseContainer<SELF>> extends GenericContainer<SELF> implements LinkableContainer {
 
     private static final Object DRIVER_LOAD_MUTEX = new Object();
     private Driver driver;
@@ -123,7 +123,7 @@ public abstract class JdbcDatabaseContainer extends GenericContainer implements 
                 throw new ContainerLaunchException("Could not locate a classpath resource for " + paramName +" of " + resourceName);
             }
 
-            addHostSystemAwareFileSystemBind(classPathResource.getFile(), pathNameInContainer, BindMode.READ_ONLY);
+            addFileSystemBind(classPathResource.getFile(), pathNameInContainer, BindMode.READ_ONLY);
         }
     }
 

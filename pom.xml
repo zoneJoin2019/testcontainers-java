@@ -55,6 +55,11 @@
             <name>Viktor Schulz</name>
             <email>vschulz@mail.uni-mannheim.de</email>
         </developer>
+        <developer>
+            <id>pcornish</id>
+            <name>Pete Cornish</name>
+            <email>outofcoffee@gmail.com</email>
+        </developer>
     </developers>
 
     <dependencies>
@@ -87,7 +92,7 @@
         <dependency>
             <groupId>org.rnorth.visible-assertions</groupId>
             <artifactId>visible-assertions</artifactId>
-            <version>1.0.2</version>
+            <version>1.0.5</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -155,6 +160,7 @@
             <id>proprietary-deps</id>
             <modules>
                 <module>modules/oracle-xe</module>
+                <module>modules/virtuoso</module>
             </modules>
         </profile>
         <profile>

@@ -17,7 +17,6 @@ import lombok.NonNull;
 import org.apache.commons.lang.SystemUtils;
 import org.jetbrains.annotations.Nullable;
 import org.junit.runner.Description;
-import org.rnorth.ducttape.TimeoutException;
 import org.rnorth.ducttape.ratelimits.RateLimiter;
 import org.rnorth.ducttape.ratelimits.RateLimiterBuilder;
 import org.rnorth.ducttape.unreliables.Unreliables;
@@ -29,12 +28,13 @@ import org.testcontainers.containers.output.OutputFrame;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.containers.output.ToStringConsumer;
 import org.testcontainers.containers.traits.LinkableContainer;
+import org.testcontainers.containers.wait.Wait;
+import org.testcontainers.containers.wait.WaitStrategy;
 import org.testcontainers.images.RemoteDockerImage;
 import org.testcontainers.utility.*;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.Socket;
 import java.net.URL;
 import java.nio.charset.Charset;
 import java.nio.file.Path;
@@ -56,14 +56,15 @@ import static org.testcontainers.utility.CommandLine.runShellCommand;
  */
 @Data
 @EqualsAndHashCode(callSuper = false)
-public class GenericContainer extends FailureDetectingExternalResource implements LinkableContainer {
+public class GenericContainer<SELF extends GenericContainer<SELF>>
+        extends FailureDetectingExternalResource
+        implements Container<SELF> {
 
     public static final int STARTUP_RETRY_COUNT = 3;
 
     private static final Charset UTF8 = Charset.forName("UTF-8");
 
     public static final int CONTAINER_RUNNING_TIMEOUT_SEC = 30;
-
 
     /*
      * Default settings
@@ -93,9 +94,6 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     private Map<String, LinkableContainer> linkedContainers = new HashMap<>();
 
     @NonNull
-    private Duration startupTimeout = Duration.ofSeconds(60);
-
-    @NonNull
     private Duration minimumRunningDuration = null;
 
     /*
@@ -113,6 +111,12 @@ public class GenericContainer extends FailureDetectingExternalResource implement
      */
     protected String containerId;
     protected String containerName;
+
+    /**
+     * The approach to determine if the container is ready.
+     */
+    @NonNull
+    protected WaitStrategy waitStrategy = Wait.defaultWaitStrategy();
 
     @Nullable
     private InspectContainerResponse containerInfo;
@@ -171,7 +175,7 @@ public class GenericContainer extends FailureDetectingExternalResource implement
             profiler.start("Create container");
             CreateContainerCmd createCommand = dockerClient.createContainerCmd(dockerImageName);
             applyConfiguration(createCommand);
-            
+
             containerId = createCommand.exec().getId();
             ContainerReaper.instance().registerContainerForCleanup(containerId, dockerImageName);
 
@@ -299,6 +303,9 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     protected void containerIsStarted(InspectContainerResponse containerInfo) {
     }
 
+    /**
+     * @return the port on which to check if the container is ready
+     */
     protected Integer getLivenessCheckPort() {
         if (exposedPorts.size() > 0) {
             return getMappedPort(exposedPorts.get(0));
@@ -351,90 +358,86 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     }
 
     /**
+     * {@inheritDoc}
+     */
+    @Override
+    public SELF waitingFor(@NonNull WaitStrategy waitStrategy) {
+        this.waitStrategy = waitStrategy;
+        return self();
+    }
+
+    /**
+     * The {@link WaitStrategy} to use to determine if the container is ready.
+     * Defaults to {@link Wait#defaultWaitStrategy()}.
+     *
+     * @return the {@link WaitStrategy} to use
+     */
+    protected WaitStrategy getWaitStrategy() {
+        return waitStrategy;
+    }
+
+    /**
      * Wait until the container has started. The default implementation simply
-     * waits for a port to start listening; subclasses may override if more
-     * sophisticated behaviour is required.
+     * waits for a port to start listening; other implementations are available
+     * as implementations of {@link WaitStrategy}
+     *
+     * @see #waitingFor(WaitStrategy)
      */
     protected void waitUntilContainerStarted() {
-        waitForListeningPort(DockerClientFactory.instance().dockerHostIpAddress(), getLivenessCheckPort());
+        getWaitStrategy().waitUntilReady(this);
     }
 
     /**
-     * Waits for a port to start listening for incoming connections.
-     *
-     * @param ipAddress the IP address to attempt to connect to
-     * @param port      the port which will start accepting connections
+     * {@inheritDoc}
      */
-    protected void waitForListeningPort(String ipAddress, Integer port) {
-
-        if (port == null) {
-            return;
-        }
-
-        try {
-            Unreliables.retryUntilSuccess((int) startupTimeout.getSeconds(), TimeUnit.SECONDS, () -> {
-                DOCKER_CLIENT_RATE_LIMITER.doWhenReady(() -> {
-                    try {
-                        new Socket(ipAddress, port).close();
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
-                return true;
-            });
-        } catch (TimeoutException e) {
-            throw new ContainerLaunchException("Timed out waiting for container port to open (" + ipAddress + ":" + port + " should be listening)");
-        }
-    }
-
-
-    /**
-     * Set the command that should be run in the container
-     *
-     * @param command a command in single string format (will automatically be split on spaces)
-     */
+    @Override
     public void setCommand(@NonNull String command) {
         this.commandParts = command.split(" ");
     }
 
     /**
-     * Set the command that should be run in the container
-     *
-     * @param commandParts a command as an array of string parts
+     * {@inheritDoc}
      */
+    @Override
     public void setCommand(@NonNull String... commandParts) {
         this.commandParts = commandParts;
     }
 
     /**
-     * Add an environment variable to be passed to the container.
-     *
-     * @param key   environment variable key
-     * @param value environment variable value
+     * {@inheritDoc}
      */
+    @Override
     public void addEnv(String key, String value) {
         env.add(key + "=" + value);
     }
 
-    public void addHostSystemAwareFileSystemBind(String hostPath, String containerPath, BindMode mode) {
+    public void addFileSystemBind(String hostPath, String containerPath, BindMode mode) {
     	if(SystemUtils.IS_OS_WINDOWS) {
     		hostPath = PathUtils.createMinGWPath(hostPath);
     	}
-        addFileSystemBind(hostPath, containerPath, mode);
-    }
-    
-    public void addFileSystemBind(String hostPath, String containerPath, BindMode mode) {
         binds.add(new Bind(hostPath, new Volume(containerPath), mode.accessMode));
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public SELF withFileSystemBind(String hostPath, String containerPath, BindMode mode) {
+        addFileSystemBind(hostPath, containerPath, mode);
+        return self();
+    }
+
+    @Override
     public void addLink(LinkableContainer otherContainer, String alias) {
         this.linkedContainers.put(alias, otherContainer);
     }
 
+    @Override
     public void addExposedPort(Integer port) {
         exposedPorts.add(port);
     }
 
+    @Override
     public void addExposedPorts(int... ports) {
         for (int port : ports) {
             exposedPorts.add(port);
@@ -451,16 +454,13 @@ public class GenericContainer extends FailureDetectingExternalResource implement
         this.stop();
     }
 
-
     /**
-     * Set the ports that this container listens on
-     *
-     * @param ports an array of TCP ports
-     * @return this
+     * {@inheritDoc}
      */
-    public GenericContainer withExposedPorts(Integer... ports) {
+    @Override
+    public SELF withExposedPorts(Integer... ports) {
         this.setExposedPorts(asList(ports));
-        return this;
+        return self();
 
     }
 
@@ -479,60 +479,46 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     }
 
     /**
-     * Add an environment variable to be passed to the container.
-     *
-     * @param key   environment variable key
-     * @param value environment variable value
-     * @return this
+     * {@inheritDoc}
      */
-    public GenericContainer withEnv(String key, String value) {
+    @Override
+    public SELF withEnv(String key, String value) {
         this.addEnv(key, value);
-        return this;
+        return self();
     }
 
     /**
-     * Set the command that should be run in the container
-     *
-     * @param cmd a command in single string format (will automatically be split on spaces)
-     * @return this
+     * {@inheritDoc}
      */
-    public GenericContainer withCommand(String cmd) {
+    @Override
+    public SELF withCommand(String cmd) {
         this.setCommand(cmd);
-        return this;
+        return self();
     }
 
     /**
-     * Set the command that should be run in the container
-     *
-     * @param commandParts a command as an array of string parts
-     * @return this
+     * {@inheritDoc}
      */
-    public GenericContainer withCommand(String... commandParts) {
+    @Override
+    public SELF withCommand(String... commandParts) {
         this.setCommand(commandParts);
-        return this;
+        return self();
     }
 
     /**
-     * Add an extra host entry to be passed to the container
-     * @param hostname
-     * @param ipAddress
-     * @return this
+     * {@inheritDoc}
      */
-    public GenericContainer withExtraHost(String hostname, String ipAddress) {
+    @Override
+    public SELF withExtraHost(String hostname, String ipAddress) {
         this.extraHosts.add(String.format("%s:%s", hostname, ipAddress));
-        return this;
+        return self();
     }
 
     /**
-     * Map a resource (file or directory) on the classpath to a path inside the container.
-     * This will only work if you are running your tests outside a Docker container.
-     *
-     * @param resourcePath  path to the resource on the classpath (relative to the classpath root; should not start with a leading slash)
-     * @param containerPath path this should be mapped to inside the container
-     * @param mode          access mode for the file
-     * @return this
+     * {@inheritDoc}
      */
-    public GenericContainer withClasspathResourceMapping(String resourcePath, String containerPath, BindMode mode) {
+    @Override
+    public SELF withClasspathResourceMapping(String resourcePath, String containerPath, BindMode mode) {
         URL resource = GenericContainer.class.getClassLoader().getResource(resourcePath);
 
         if (resource == null) {
@@ -540,40 +526,35 @@ public class GenericContainer extends FailureDetectingExternalResource implement
         }
         String resourceFilePath = resource.getFile();
 
-        this.addHostSystemAwareFileSystemBind(resourceFilePath, containerPath, mode);
+        this.addFileSystemBind(resourceFilePath, containerPath, mode);
 
-        return this;
+        return self();
     }
 
     /**
-     * Set the duration of waiting time until container treated as started.
-     * @see GenericContainer#waitForListeningPort(String, Integer)
-     *
-     * @param startupTimeout timeout
-     * @return this
+     * {@inheritDoc}
      */
-    public GenericContainer withStartupTimeout(Duration startupTimeout) {
-        this.setStartupTimeout(startupTimeout);
-        return this;
+    @Override
+    public SELF withStartupTimeout(Duration startupTimeout) {
+        getWaitStrategy().withStartupTimeout(startupTimeout);
+        return self();
     }
 
     /**
-     * Get the IP address that this container may be reached on (may not be the local machine).
-     *
-     * @return an IP address
+     * {@inheritDoc}
      */
+    @Override
     public String getContainerIpAddress() {
         return DockerClientFactory.instance().dockerHostIpAddress();
     }
 
     /**
-     * Only consider a container to have successfully started if it has been running for this duration. The default
-     * value is null; if that's the value, ignore this check.
+     * {@inheritDoc}
      */
-
-    public GenericContainer withMinimumRunningDuration(Duration minimumRunningDuration) {
+    @Override
+    public SELF withMinimumRunningDuration(Duration minimumRunningDuration) {
         this.setMinimumRunningDuration(minimumRunningDuration);
-        return this;
+        return self();
     }
 
     /**
@@ -588,8 +569,9 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     }
 
     /**
-     * @return is the container currently running?
+     * {@inheritDoc}
      */
+    @Override
     public Boolean isRunning() {
         try {
             return dockerClient.inspectContainerCmd(containerId).exec().getState().isRunning();
@@ -599,11 +581,9 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     }
 
     /**
-     * Get the actual mapped port for a given port exposed by the container.
-     *
-     * @param originalPort the original TCP port that is exposed
-     * @return the port that the exposed port is mapped to, or null if it is not exposed
+     * {@inheritDoc}
      */
+    @Override
     public Integer getMappedPort(final int originalPort) {
 
         Preconditions.checkState(containerId != null, "Mapped port can only be obtained after the container is started");
@@ -621,10 +601,9 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     }
 
     /**
-     * <b>Resolve</b> Docker image and set it.
-     *
-     * @param dockerImageName image name
+     * {@inheritDoc}
      */
+    @Override
     public void setDockerImageName(@NonNull String dockerImageName) {
         this.image = new RemoteDockerImage(dockerImageName);
 
@@ -633,10 +612,9 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     }
 
     /**
-     * Get image name.
-     *
-     * @return image name
+     * {@inheritDoc}
      */
+    @Override
     @NonNull
     public String getDockerImageName() {
         try {
@@ -647,15 +625,9 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     }
 
     /**
-     * Get the IP address that containers (e.g. browsers) can use to reference a service running on the local machine,
-     * i.e. the machine on which this test is running.
-     * <p>
-     * For example, if a web server is running on port 8080 on this local machine, the containerized web driver needs
-     * to be pointed at "http://" + getTestHostIpAddress() + ":8080" in order to access it. Trying to hit localhost
-     * from inside the container is not going to work, since the container has its own IP address.
-     *
-     * @return the IP address of the host machine
+     * {@inheritDoc}
      */
+    @Override
     public String getTestHostIpAddress() {
         if (DockerMachineClient.instance().isInstalled()) {
             try {
@@ -685,21 +657,17 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     }
 
     /**
-     * Follow container output, sending each frame (usually, line) to a consumer. Stdout and stderr will be followed.
-     *
-     * @param consumer consumer that the frames should be sent to
+     * {@inheritDoc}
      */
+    @Override
     public void followOutput(Consumer<OutputFrame> consumer) {
         this.followOutput(consumer, OutputFrame.OutputType.STDOUT, OutputFrame.OutputType.STDERR);
     }
 
     /**
-     * Follow container output, sending each frame (usually, line) to a consumer. This method allows Stdout and/or stderr
-     * to be selected.
-     *
-     * @param consumer consumer that the frames should be sent to
-     * @param types    types that should be followed (one or both of STDOUT, STDERR)
+     * {@inheritDoc}
      */
+    @Override
     public void followOutput(Consumer<OutputFrame> consumer, OutputFrame.OutputType... types) {
         LogContainerCmd cmd = dockerClient.logContainerCmd(containerId)
                 .withFollowStream(true);
@@ -714,6 +682,7 @@ public class GenericContainer extends FailureDetectingExternalResource implement
         cmd.exec(callback);
     }
 
+    @Override
     public synchronized Info fetchDockerDaemonInfo() throws IOException {
 
         if (this.dockerDaemonInfo == null) {
@@ -723,11 +692,9 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     }
 
     /**
-     * Run a command inside a running container, as though using "docker exec", and interpreting
-     * the output as UTF8.
-     * <p>
-     * @see #execInContainer(Charset, String...)
+     * {@inheritDoc}
      */
+    @Override
     public ExecResult execInContainer(String... command)
             throws UnsupportedOperationException, IOException, InterruptedException {
 
@@ -735,17 +702,9 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     }
 
     /**
-     * Run a command inside a running container, as though using "docker exec".
-     * <p>
-     * This functionality is not available on a docker daemon running the older "lxc" execution driver. At
-     * the time of writing, CircleCI was using this driver.
-     * @param outputCharset the character set used to interpret the output.
-     * @param command the parts of the command to run
-     * @return the result of execution
-     * @throws IOException if there's an issue communicating with Docker
-     * @throws InterruptedException if the thread waiting for the response is interrupted
-     * @throws UnsupportedOperationException if the docker daemon you're connecting to doesn't support "exec".
+     * {@inheritDoc}
      */
+    @Override
     public ExecResult execInContainer(Charset outputCharset, String... command)
             throws UnsupportedOperationException, IOException, InterruptedException {
 
@@ -782,24 +741,61 @@ public class GenericContainer extends FailureDetectingExternalResource implement
     }
 
     /**
-     * Class to hold results from a "docker exec" command. Note that, due to the limitations of the
-     * docker API, there's no easy way to get the result code from the process we ran.
+     * Convenience class with access to non-public members of GenericContainer.
      */
-    public static class ExecResult {
-        private final String stdout;
-        private final String stderr;
+    public static abstract class AbstractWaitStrategy implements WaitStrategy {
+        protected GenericContainer container;
 
-        public ExecResult(String stdout, String stderr) {
-            this.stdout = stdout;
-            this.stderr = stderr;
+        @NonNull
+        protected Duration startupTimeout = Duration.ofSeconds(60);
+
+        /**
+         * Wait until the container has started.
+         *
+         * @param container the container for which to wait
+         */
+        @Override
+        public void waitUntilReady(GenericContainer container) {
+            this.container = container;
+            waitUntilReady();
         }
 
-        public String getStdout() {
-            return stdout;
+        /**
+         * Wait until {@link #container} has started.
+         */
+        protected abstract void waitUntilReady();
+
+        /**
+         * Set the duration of waiting time until container treated as started.
+         *
+         * @param startupTimeout timeout
+         * @return this
+         * @see WaitStrategy#waitUntilReady(GenericContainer)
+         */
+        public WaitStrategy withStartupTimeout(Duration startupTimeout) {
+            this.startupTimeout = startupTimeout;
+            return this;
         }
 
-        public String getStderr() {
-            return stderr;
+        /**
+         * @return the container's logger
+         */
+        protected Logger logger() {
+            return container.logger();
+        }
+
+        /**
+         * @return the port on which to check if the container is ready
+         */
+        protected Integer getLivenessCheckPort() {
+            return container.getLivenessCheckPort();
+        }
+
+        /**
+         * @return the rate limiter to use
+         */
+        protected RateLimiter getRateLimiter() {
+            return DOCKER_CLIENT_RATE_LIMITER;
         }
     }
 }
